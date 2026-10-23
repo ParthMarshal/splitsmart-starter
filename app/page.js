@@ -1,175 +1,642 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
-// The starter data — the same "My Group" you see in the course slide. You'll replace
-// this with a real database in Hour 5. For now it lives in the browser (localStorage).
-const SEED = [
-  { id: 'seed-1', emoji: '🍽️', name: 'Dinner', paidBy: 'Aisha', amount: 1800 },
-  { id: 'seed-2', emoji: '🚕', name: 'Cab', paidBy: 'Raj', amount: 400 },
-];
+const STORAGE_KEY = 'splitsmart.daily.expenses';
+const DEFAULT_PARTICIPANTS = ['Aisha', 'Raj', 'You'];
 
-const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
+const money = (value) => '₹' + Number(value || 0).toLocaleString('en-IN');
 
-// Basic "parse an expense from text" — just enough to work. In Hour 3 you'll replace
-// this naive version with a real AI call (Gemini) that understands messy human sentences.
-function parseExpense(text) {
-  const amountMatch = text.match(/\d[\d,]*(\.\d+)?/);
-  const amount = amountMatch ? Number(amountMatch[0].replace(/,/g, '')) : 0;
-  const name = text.replace(/\d[\d,]*(\.\d+)?/, '').replace(/\s+/g, ' ').trim() || 'Expense';
-  return { id: 'e-' + Date.now(), emoji: '🧾', name: name.charAt(0).toUpperCase() + name.slice(1), paidBy: 'You', amount };
-}
+const formatDateKey = (date) => {
+  const d = new Date(date);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
+const addDays = (dateString, amount) => {
+  const d = new Date(`${dateString}T12:00:00`);
+  d.setDate(d.getDate() + amount);
+  return formatDateKey(d);
+};
+
+const prettyDate = (dateString) => {
+  const date = new Date(`${dateString}T12:00:00`);
+  return new Intl.DateTimeFormat('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(date);
+};
+
+const dayLabel = (dateString) => {
+  const today = formatDateKey(new Date());
+  const yesterday = addDays(today, -1);
+
+  if (dateString === today) return 'Today';
+  if (dateString === yesterday) return 'Yesterday';
+  return prettyDate(dateString);
+};
+
+const buildSeedExpenses = () => {
+  const today = formatDateKey(new Date());
+  const yesterday = addDays(today, -1);
+  const twoDaysAgo = addDays(today, -2);
+
+  return [
+    {
+      id: 'seed-1',
+      title: 'Dinner',
+      category: 'Food',
+      amount: 1800,
+      paidBy: 'Aisha',
+      splitType: 'equal',
+      splitBetween: ['Aisha', 'Raj', 'You'],
+      customShares: { Aisha: 600, Raj: 600, You: 600 },
+      date: today,
+    },
+    {
+      id: 'seed-2',
+      title: 'Cab Ride',
+      category: 'Travel',
+      amount: 450,
+      paidBy: 'Raj',
+      splitType: 'custom',
+      splitBetween: ['Aisha', 'Raj', 'You'],
+      customShares: { Aisha: 150, Raj: 150, You: 150 },
+      date: yesterday,
+    },
+    {
+      id: 'seed-3',
+      title: 'Groceries',
+      category: 'House',
+      amount: 980,
+      paidBy: 'You',
+      splitType: 'equal',
+      splitBetween: ['Aisha', 'Raj', 'You'],
+      customShares: { Aisha: 326.67, Raj: 326.67, You: 326.66 },
+      date: twoDaysAgo,
+    },
+  ];
+};
+
+const createDefaultForm = (participants) => ({
+  title: '',
+  category: 'Food',
+  amount: '',
+  paidBy: participants[0] || 'You',
+  splitType: 'equal',
+  splitBetween: [...participants],
+  date: formatDateKey(new Date()),
+  customShares: Object.fromEntries((participants || []).map((person) => [person, 0])),
+});
+
+const normalizeShares = (amount, participants, currentShares = {}) => {
+  const selected = participants.length ? participants : ['You'];
+  const totalSelected = selected.reduce((sum, person) => sum + (Number(currentShares[person] || 0) || 0), 0);
+  const normalized = { ...currentShares };
+
+  if (!selected.length) return normalized;
+
+  if (!totalSelected || Number(amount) <= 0) {
+    const even = Number(amount || 0) / selected.length;
+    selected.forEach((person) => {
+      normalized[person] = Number((even || 0).toFixed(2));
+    });
+    return normalized;
+  }
+
+  const remaining = Number(amount) - totalSelected;
+  const last = selected[selected.length - 1];
+  normalized[last] = Number((Number(normalized[last] || 0) + remaining).toFixed(2));
+  return normalized;
+};
 
 export default function Home() {
-  const [expenses, setExpenses] = useState(SEED);
-  const [text, setText] = useState('');
-  const [ready, setReady] = useState(false);
+  const [participants, setParticipants] = useState(DEFAULT_PARTICIPANTS);
+  const [expenses, setExpenses] = useState([]);
+  const [form, setForm] = useState(createDefaultForm(DEFAULT_PARTICIPANTS));
+  const [newParticipant, setNewParticipant] = useState('');
+  const [isReady, setIsReady] = useState(false);
 
-  // Load any saved expenses from the browser on first render.
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('splitsmart.expenses');
-      if (saved) setExpenses(JSON.parse(saved));
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const data = JSON.parse(saved);
+        if (Array.isArray(data.expenses)) {
+          setExpenses(data.expenses);
+        }
+        if (Array.isArray(data.participants) && data.participants.length) {
+          setParticipants(data.participants);
+          setForm((current) => ({
+            ...createDefaultForm(data.participants),
+            ...current,
+            paidBy: data.participants.includes(current.paidBy) ? current.paidBy : data.participants[0],
+            splitBetween: current.splitBetween.filter((person) => data.participants.includes(person)).length
+              ? current.splitBetween.filter((person) => data.participants.includes(person))
+              : [...data.participants],
+            customShares: Object.fromEntries((data.participants || []).map((person) => [person, current.customShares?.[person] ?? 0])),
+          }));
+        }
+      }
     } catch {}
-    setReady(true);
+
+    setExpenses((current) => (current.length ? current : buildSeedExpenses()));
+    setIsReady(true);
   }, []);
 
-  // Save whenever the list changes.
   useEffect(() => {
-    if (ready) {
-      try { localStorage.setItem('splitsmart.expenses', JSON.stringify(expenses)); } catch {}
+    if (!isReady) return;
+    try {
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({
+          expenses,
+          participants,
+        }),
+      );
+    } catch {}
+  }, [expenses, participants, isReady]);
+
+  useEffect(() => {
+    setForm((current) => ({
+      ...current,
+      paidBy: participants.includes(current.paidBy) ? current.paidBy : participants[0] || 'You',
+      splitBetween: current.splitBetween.filter((person) => participants.includes(person)).length
+        ? current.splitBetween.filter((person) => participants.includes(person))
+        : [...participants],
+      customShares: Object.fromEntries((participants || []).map((person) => [person, current.customShares?.[person] ?? 0])),
+    }));
+  }, [participants]);
+
+  const totalSpent = useMemo(() => expenses.reduce((sum, expense) => sum + Number(expense.amount || 0), 0), [expenses]);
+
+  const dailyGroups = useMemo(() => {
+    const grouped = {};
+    expenses.forEach((expense) => {
+      const key = expense.date || formatDateKey(new Date());
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(expense);
+    });
+
+    return Object.entries(grouped)
+      .sort((a, b) => new Date(b[0]) - new Date(a[0]))
+      .map(([date, items]) => ({
+        date,
+        label: dayLabel(date),
+        total: items.reduce((sum, item) => sum + Number(item.amount || 0), 0),
+        entries: items.sort((a, b) => new Date(b.date) - new Date(a.date)),
+      }));
+  }, [expenses]);
+
+  const overallBalances = useMemo(() => {
+    const balances = Object.fromEntries(participants.map((person) => [person, 0]));
+
+    expenses.forEach((expense) => {
+      const selected = expense.splitBetween || participants;
+      const perPersonShare = expense.splitType === 'custom'
+        ? selected.reduce((acc, person) => {
+            acc[person] = Number(expense.customShares?.[person] || 0);
+            return acc;
+          }, {})
+        : selected.reduce((acc, person) => {
+            acc[person] = Number(expense.amount || 0) / selected.length;
+            return acc;
+          }, {});
+
+      selected.forEach((person) => {
+        balances[person] -= Number(perPersonShare[person] || 0);
+      });
+
+      balances[expense.paidBy] += Number(expense.amount || 0);
+    });
+
+    return balances;
+  }, [expenses, participants]);
+
+  const overallSettle = useMemo(() => {
+    const creditors = [];
+    const debtors = [];
+
+    Object.entries(overallBalances).forEach(([person, amount]) => {
+      if (amount > 0) creditors.push({ person, amount });
+      if (amount < 0) debtors.push({ person, amount: Math.abs(amount) });
+    });
+
+    creditors.sort((a, b) => b.amount - a.amount);
+    debtors.sort((a, b) => b.amount - a.amount);
+
+    const rows = [];
+    let i = 0;
+    let j = 0;
+
+    while (i < creditors.length && j < debtors.length) {
+      const creditor = creditors[i];
+      const debtor = debtors[j];
+      const transfer = Math.min(creditor.amount, debtor.amount);
+
+      if (transfer > 0) {
+        rows.push({
+          from: debtor.person,
+          to: creditor.person,
+          amount: transfer,
+        });
+      }
+
+      creditor.amount -= transfer;
+      debtor.amount -= transfer;
+
+      if (creditor.amount <= 0.01) i += 1;
+      if (debtor.amount <= 0.01) j += 1;
     }
-  }, [expenses, ready]);
 
-  const total = expenses.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+    return rows;
+  }, [overallBalances]);
 
-  const addExpense = () => {
-    const t = text.trim();
-    if (!t) return;
-    setExpenses((list) => [...list, parseExpense(t)]);
-    setText('');
+  const addParticipant = () => {
+    const value = newParticipant.trim();
+    if (!value || participants.includes(value)) {
+      setNewParticipant('');
+      return;
+    }
+    const nextParticipants = [...participants, value];
+    setParticipants(nextParticipants);
+    setForm((current) => ({
+      ...current,
+      paidBy: current.paidBy || value,
+      splitBetween: current.splitBetween.includes(value) ? current.splitBetween : [...current.splitBetween, value],
+      customShares: {
+        ...current.customShares,
+        [value]: 0,
+      },
+    }));
+    setNewParticipant('');
   };
 
-  const removeExpense = (id) => setExpenses((list) => list.filter((e) => e.id !== id));
+  const updateSplitParticipant = (person, checked) => {
+    setForm((current) => {
+      const currentSplit = new Set(current.splitBetween);
+      if (checked) {
+        currentSplit.add(person);
+      } else {
+        currentSplit.delete(person);
+      }
+
+      const nextSplit = [...currentSplit];
+      return {
+        ...current,
+        splitBetween: nextSplit,
+        customShares: {
+          ...current.customShares,
+          [person]: Number(current.customShares?.[person] || 0),
+        },
+      };
+    });
+  };
+
+  const addExpense = (event) => {
+    event.preventDefault();
+    const amount = Number(form.amount || 0);
+    if (!form.title.trim() || !amount || !form.paidBy) return;
+
+    const selectedParticipants = form.splitBetween.length ? form.splitBetween : [form.paidBy];
+    const normalizedCustom = normalizeShares(amount, selectedParticipants, form.customShares || {});
+
+    const nextExpense = {
+      id: `exp-${Date.now()}`,
+      title: form.title.trim(),
+      category: form.category,
+      amount,
+      paidBy: form.paidBy,
+      splitType: form.splitType,
+      splitBetween: selectedParticipants,
+      customShares: normalizedCustom,
+      date: form.date,
+    };
+
+    setExpenses((current) => [nextExpense, ...current]);
+    setForm((current) => ({
+      ...createDefaultForm(participants),
+      paidBy: current.paidBy,
+      splitBetween: [...participants],
+      customShares: Object.fromEntries((participants || []).map((person) => [person, 0])),
+      date: current.date,
+    }));
+  };
+
+  const removeExpense = (id) => {
+    setExpenses((current) => current.filter((expense) => expense.id !== id));
+  };
+
+  const expenseSettlementsForDay = (items) => {
+    const balances = Object.fromEntries(participants.map((person) => [person, 0]));
+
+    items.forEach((expense) => {
+      const members = expense.splitBetween || participants;
+      const shareValue = expense.splitType === 'custom'
+        ? members.reduce((acc, person) => {
+            acc[person] = Number(expense.customShares?.[person] || 0);
+            return acc;
+          }, {})
+        : members.reduce((acc, person) => {
+            acc[person] = Number(expense.amount || 0) / members.length;
+            return acc;
+          }, {});
+
+      members.forEach((person) => {
+        balances[person] -= Number(shareValue[person] || 0);
+      });
+
+      balances[expense.paidBy] += Number(expense.amount || 0);
+    });
+
+    const creditors = [];
+    const debtors = [];
+
+    Object.entries(balances).forEach(([person, value]) => {
+      if (value > 0.01) creditors.push({ person, amount: value });
+      if (value < -0.01) debtors.push({ person, amount: Math.abs(value) });
+    });
+
+    creditors.sort((a, b) => b.amount - a.amount);
+    debtors.sort((a, b) => b.amount - a.amount);
+
+    const rows = [];
+    let i = 0;
+    let j = 0;
+
+    while (i < creditors.length && j < debtors.length) {
+      const creditor = creditors[i];
+      const debtor = debtors[j];
+      const transfer = Math.min(creditor.amount, debtor.amount);
+
+      if (transfer > 0.01) {
+        rows.push({
+          from: debtor.person,
+          to: creditor.person,
+          amount: transfer,
+        });
+      }
+
+      creditor.amount -= transfer;
+      debtor.amount -= transfer;
+      if (creditor.amount <= 0.01) i += 1;
+      if (debtor.amount <= 0.01) j += 1;
+    }
+
+    return rows;
+  };
 
   return (
-    <main style={styles.page}>
-      <div style={styles.card}>
-        {/* Header */}
-        <div style={styles.header}>
-          <div style={styles.brand}>
-            <div style={styles.logo}>S</div>
-            <div style={styles.title}>SplitSmart</div>
+    <main className="app-shell">
+      <div className="frame">
+        <header className="topbar">
+          <div>
+            <div className="eyebrow">DAILY LEDGER</div>
+            <h1>SplitSmart</h1>
           </div>
-          <div style={styles.groupPill}>My Group</div>
-        </div>
+          <div className="live-pill">{dayLabel(formatDateKey(new Date()))}</div>
+        </header>
 
-        {/* Add an expense */}
-        <div style={styles.addRow}>
-          <input
-            style={styles.input}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && addExpense()}
-            placeholder="Add an expense…"
-            aria-label="Add an expense"
-          />
-          <button style={styles.addBtn} onClick={addExpense} aria-label="Add">+</button>
-        </div>
+        <section className="summary-grid">
+          <div className="stat-card highlight">
+            <span className="label">TOTAL SPENT</span>
+            <strong>{money(totalSpent)}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="label">NET BALANCE</span>
+            <strong className={Object.values(overallBalances).some((value) => value > 0) ? 'positive' : 'neutral'}>
+              {money(Object.values(overallBalances).reduce((sum, value) => sum + value, 0))}
+            </strong>
+          </div>
+        </section>
 
-        {/* Expense list */}
-        <div style={styles.list}>
-          {expenses.length === 0 && (
-            <div style={styles.empty}>No expenses yet — add your first one above.</div>
-          )}
-          {expenses.map((e) => (
-            <div key={e.id} style={styles.item}>
-              <div style={styles.itemEmoji}>{e.emoji}</div>
-              <div style={styles.itemMain}>
-                <div style={styles.itemName}>{e.name}</div>
-                <div style={styles.itemPaid}>paid by {e.paidBy}</div>
-              </div>
-              <div style={styles.itemAmount}>{inr(e.amount)}</div>
-              <button style={styles.remove} onClick={() => removeExpense(e.id)} aria-label={`Remove ${e.name}`}>×</button>
+        <section className="panel participants-panel">
+          <div className="section-head">
+            <span>GROUP</span>
+            <span className="meta">{participants.length} members</span>
+          </div>
+
+          <div className="chips">
+            {participants.map((person) => (
+              <span key={person} className="chip">{person}</span>
+            ))}
+          </div>
+
+          <div className="participant-adder">
+            <input
+              type="text"
+              value={newParticipant}
+              onChange={(event) => setNewParticipant(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && (event.preventDefault(), addParticipant())}
+              placeholder="Add friend"
+            />
+            <button type="button" className="secondary-btn" onClick={addParticipant}>Add</button>
+          </div>
+        </section>
+
+        <form className="panel form-panel" onSubmit={addExpense}>
+          <div className="section-head">
+            <span>ADD EXPENSE</span>
+            <span className="meta">daily entry</span>
+          </div>
+
+          <div className="field-grid">
+            <label>
+              <span>Title</span>
+              <input
+                type="text"
+                value={form.title}
+                onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
+                placeholder="Dinner, groceries..."
+              />
+            </label>
+
+            <label>
+              <span>Category</span>
+              <input
+                type="text"
+                value={form.category}
+                onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))}
+              />
+            </label>
+
+            <label>
+              <span>Amount</span>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.amount}
+                onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))}
+                placeholder="0"
+              />
+            </label>
+
+            <label>
+              <span>Date</span>
+              <input
+                type="date"
+                value={form.date}
+                onChange={(event) => setForm((current) => ({ ...current, date: event.target.value }))}
+              />
+            </label>
+
+            <label>
+              <span>Paid by</span>
+              <select
+                value={form.paidBy}
+                onChange={(event) => setForm((current) => ({ ...current, paidBy: event.target.value }))}
+              >
+                {participants.map((person) => (
+                  <option key={person} value={person}>{person}</option>
+                ))}
+              </select>
+            </label>
+
+            <label>
+              <span>Split</span>
+              <select
+                value={form.splitType}
+                onChange={(event) => setForm((current) => ({ ...current, splitType: event.target.value }))}
+              >
+                <option value="equal">Equal</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="split-box">
+            <div className="split-head">
+              <span>Split between</span>
+              <span className="meta">{form.splitBetween.length} selected</span>
             </div>
-          ))}
-        </div>
 
-        {/* Total */}
-        <div style={styles.total}>Total {inr(total)}</div>
+            <div className="split-list">
+              {participants.map((person) => (
+                <label key={person} className="split-row">
+                  <input
+                    type="checkbox"
+                    checked={form.splitBetween.includes(person)}
+                    onChange={(event) => updateSplitParticipant(person, event.target.checked)}
+                  />
+                  <span>{person}</span>
+                </label>
+              ))}
+            </div>
+
+            {form.splitType === 'custom' && (
+              <div className="custom-amounts">
+                {form.splitBetween.map((person) => (
+                  <label key={person}>
+                    <span>{person}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={form.customShares?.[person] ?? 0}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setForm((current) => ({
+                          ...current,
+                          customShares: {
+                            ...current.customShares,
+                            [person]: Number(value || 0),
+                          },
+                        }));
+                      }}
+                    />
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <button type="submit" className="primary-btn">Add Expense</button>
+        </form>
+
+        <section className="panel settlement-panel">
+          <div className="section-head">
+            <span>SETTLEMENTS</span>
+            <span className="meta">net balance</span>
+          </div>
+
+          <div className="settlement-list">
+            {overallSettle.length === 0 ? (
+              <div className="empty-state">Everything is settled.</div>
+            ) : (
+              overallSettle.map((row) => (
+                <div key={`${row.from}-${row.to}`} className="settle-row">
+                  <span>{row.from}</span>
+                  <span className="arrow">→</span>
+                  <span>{row.to}</span>
+                  <strong>{money(row.amount)}</strong>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="ledger">
+          {dailyGroups.length === 0 ? (
+            <div className="panel empty-ledger">No expenses yet. Add the first one above.</div>
+          ) : (
+            dailyGroups.map((group) => (
+              <article key={group.date} className="panel day-card">
+                <div className="day-head">
+                  <div>
+                    <div className="day-label">{group.label}</div>
+                    <div className="day-date">{prettyDate(group.date)}</div>
+                  </div>
+                  <div className="day-total">{money(group.total)}</div>
+                </div>
+
+                <div className="entry-list">
+                  {group.entries.map((expense) => (
+                    <div key={expense.id} className="entry-row">
+                      <div className="entry-main">
+                        <div className="entry-title-row">
+                          <span className="entry-title">{expense.title}</span>
+                          <button type="button" className="ghost-btn" onClick={() => removeExpense(expense.id)}>Remove</button>
+                        </div>
+                        <div className="entry-meta">
+                          {expense.category} • paid by {expense.paidBy}
+                        </div>
+                        <div className="entry-meta muted">
+                          {expense.splitType === 'equal' ? 'Equal split' : 'Custom split'} • {expense.splitBetween.join(', ')}
+                        </div>
+                      </div>
+
+                      <div className="entry-amount">
+                        <strong>{money(expense.amount)}</strong>
+                        <span>{expense.splitType === 'equal' ? `${money(Number(expense.amount || 0) / expense.splitBetween.length)} each` : 'custom share'}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="day-settlement">
+                  <div className="settlement-label">Daily settlement</div>
+                  {expenseSettlementsForDay(group.entries).length === 0 ? (
+                    <div className="settled">Settled</div>
+                  ) : (
+                    expenseSettlementsForDay(group.entries).map((row) => (
+                      <div key={`${group.date}-${row.from}-${row.to}`} className="day-settlement-row">
+                        <span>{row.from}</span>
+                        <span className="arrow">→</span>
+                        <span>{row.to}</span>
+                        <strong>{money(row.amount)}</strong>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </article>
+            ))
+          )}
+        </section>
       </div>
-
-      <p style={styles.footnote}>
-        SplitSmart starter · deepEntra Academy — Build &amp; Ship It.<br />
-        This is the basic app — you&apos;ll add the AI and a real database next.
-      </p>
     </main>
   );
 }
-
-const styles = {
-  page: {
-    minHeight: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'flex-start',
-    padding: '28px 16px 48px',
-  },
-  card: {
-    width: '100%',
-    maxWidth: 420,
-    background: 'var(--card)',
-    borderRadius: 24,
-    boxShadow: '0 24px 60px -24px rgba(13,27,62,.28)',
-    border: '1px solid var(--line)',
-    padding: 20,
-    marginTop: 12,
-  },
-  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 18 },
-  brand: { display: 'flex', alignItems: 'center', gap: 10 },
-  logo: {
-    width: 36, height: 36, borderRadius: 11, display: 'grid', placeItems: 'center',
-    color: '#fff', fontWeight: 800, fontSize: 18,
-    background: 'linear-gradient(135deg, var(--blue), var(--cyan))',
-    boxShadow: '0 8px 18px -6px rgba(28,95,212,.55)',
-  },
-  title: { fontSize: 20, fontWeight: 800, letterSpacing: '-0.01em' },
-  groupPill: {
-    fontSize: 12.5, fontWeight: 800, color: 'var(--blue)',
-    background: 'rgba(28,95,212,.1)', padding: '6px 12px', borderRadius: 999,
-  },
-  addRow: { display: 'flex', gap: 10, marginBottom: 16 },
-  input: {
-    flex: 1, border: '1px solid var(--line)', borderRadius: 14, padding: '13px 15px',
-    fontSize: 15, outline: 'none', background: '#f7f9fc', color: 'var(--ink)',
-  },
-  addBtn: {
-    flex: 'none', width: 48, borderRadius: 14, border: 'none', color: '#fff', fontSize: 24, fontWeight: 700,
-    background: 'linear-gradient(135deg, var(--blue), var(--cyan))',
-    boxShadow: '0 10px 22px -8px rgba(28,95,212,.6)',
-  },
-  list: { display: 'flex', flexDirection: 'column', gap: 10, minHeight: 60 },
-  empty: { color: 'var(--muted)', fontSize: 14, textAlign: 'center', padding: '24px 0' },
-  item: {
-    display: 'flex', alignItems: 'center', gap: 12,
-    background: '#f7f9fc', border: '1px solid var(--line)', borderRadius: 16, padding: '12px 14px',
-  },
-  itemEmoji: {
-    width: 38, height: 38, borderRadius: 11, display: 'grid', placeItems: 'center',
-    background: '#fff', border: '1px solid var(--line)', fontSize: 19, flex: 'none',
-  },
-  itemMain: { flex: 1, minWidth: 0 },
-  itemName: { fontWeight: 700, fontSize: 15 },
-  itemPaid: { color: 'var(--muted)', fontSize: 12.5, marginTop: 1 },
-  itemAmount: { fontWeight: 800, fontSize: 15.5, fontVariantNumeric: 'tabular-nums' },
-  remove: {
-    flex: 'none', width: 26, height: 26, borderRadius: 8, border: 'none',
-    background: 'transparent', color: 'var(--muted)', fontSize: 20, lineHeight: 1,
-  },
-  total: {
-    textAlign: 'center', marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--line)',
-    fontWeight: 800, fontSize: 16, color: 'var(--ink)',
-  },
-  footnote: { color: 'var(--muted)', fontSize: 12.5, textAlign: 'center', lineHeight: 1.6, marginTop: 20, maxWidth: 420 },
-};
