@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { supabase } from '../lib/supabaseClient';
 
-const STORAGE_KEY = 'splitsmart.daily.expenses';
 const DEFAULT_PARTICIPANTS = ['Aisha', 'Raj', 'You'];
 
 const money = (value) => '₹' + Number(value || 0).toLocaleString('en-IN');
@@ -113,52 +113,75 @@ const normalizeShares = (amount, participants, currentShares = {}) => {
   return normalized;
 };
 
+const mapSupabaseExpense = (expense) => ({
+  id: expense.id,
+  title: expense.title,
+  category: expense.category || 'General',
+  amount: Number(expense.amount || 0),
+  paidBy: expense.paid_by || expense.paidBy || 'You',
+  splitType: expense.split_type || expense.splitType || 'equal',
+  splitBetween: Array.isArray(expense.split_between) ? expense.split_between : (Array.isArray(expense.splitBetween) ? expense.splitBetween : []),
+  customShares: expense.custom_shares || expense.customShares || {},
+  date: expense.date || formatDateKey(new Date()),
+});
+
 export default function Home() {
   const [participants, setParticipants] = useState(DEFAULT_PARTICIPANTS);
   const [expenses, setExpenses] = useState([]);
   const [form, setForm] = useState(createDefaultForm(DEFAULT_PARTICIPANTS));
   const [newParticipant, setNewParticipant] = useState('');
+  const [email, setEmail] = useState('');
+  const [authMessage, setAuthMessage] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [session, setSession] = useState(null);
+  const [user, setUser] = useState(null);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const data = JSON.parse(saved);
-        if (Array.isArray(data.expenses)) {
-          setExpenses(data.expenses);
-        }
-        if (Array.isArray(data.participants) && data.participants.length) {
-          setParticipants(data.participants);
-          setForm((current) => ({
-            ...createDefaultForm(data.participants),
-            ...current,
-            paidBy: data.participants.includes(current.paidBy) ? current.paidBy : data.participants[0],
-            splitBetween: current.splitBetween.filter((person) => data.participants.includes(person)).length
-              ? current.splitBetween.filter((person) => data.participants.includes(person))
-              : [...data.participants],
-            customShares: Object.fromEntries((data.participants || []).map((person) => [person, current.customShares?.[person] ?? 0])),
-          }));
-        }
+    const getSession = async () => {
+      const { data: { session: currentSession }, error } = await supabase.auth.getSession();
+      if (!error) {
+        setSession(currentSession);
+        setUser(currentSession?.user ?? null);
       }
-    } catch {}
+      setIsReady(true);
+    };
 
-    setExpenses((current) => (current.length ? current : buildSeedExpenses()));
-    setIsReady(true);
+    getSession();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setUser(nextSession?.user ?? null);
+    });
+
+    return () => authListener.subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!isReady) return;
-    try {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          expenses,
-          participants,
-        }),
-      );
-    } catch {}
-  }, [expenses, participants, isReady]);
+    if (!user) {
+      setExpenses([]);
+      return;
+    }
+
+    const fetchExpenses = async () => {
+      const { data, error } = await supabase
+        .from('expenses')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Supabase fetch error:', error);
+        setExpenses([]);
+        return;
+      }
+
+      const rows = (data || []).map(mapSupabaseExpense);
+      setExpenses(rows);
+    };
+
+    fetchExpenses();
+  }, [user]);
 
   useEffect(() => {
     setForm((current) => ({
@@ -296,27 +319,72 @@ export default function Home() {
     });
   };
 
-  const addExpense = (event) => {
+  const handleMagicLink = async (event) => {
     event.preventDefault();
+    setAuthMessage('');
+    setAuthError('');
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
+      setAuthError('Please enter your email address.');
+      return;
+    }
+
+    const redirectUrl = `${window.location.origin}`;
+    const { error } = await supabase.auth.signInWithOtp({
+      email: trimmedEmail,
+      options: {
+        emailRedirectTo: redirectUrl,
+      },
+    });
+
+    if (error) {
+      setAuthError(error.message || 'Unable to sign in.');
+      return;
+    }
+
+    setAuthMessage('Magic link sent. Check your email and click the sign-in link.');
+    setEmail('');
+  };
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setUser(null);
+    setExpenses([]);
+  };
+
+  const addExpense = async (event) => {
+    event.preventDefault();
+    if (!user) return;
+
     const amount = Number(form.amount || 0);
     if (!form.title.trim() || !amount || !form.paidBy) return;
 
     const selectedParticipants = form.splitBetween.length ? form.splitBetween : [form.paidBy];
     const normalizedCustom = normalizeShares(amount, selectedParticipants, form.customShares || {});
 
-    const nextExpense = {
-      id: `exp-${Date.now()}`,
+    const payload = {
       title: form.title.trim(),
       category: form.category,
       amount,
-      paidBy: form.paidBy,
-      splitType: form.splitType,
-      splitBetween: selectedParticipants,
-      customShares: normalizedCustom,
+      paid_by: form.paidBy,
+      split_type: form.splitType,
+      split_between: selectedParticipants,
+      custom_shares: normalizedCustom,
       date: form.date,
+      user_id: user.id,
+      created_at: new Date().toISOString(),
     };
 
-    setExpenses((current) => [nextExpense, ...current]);
+    const { data, error } = await supabase.from('expenses').insert(payload).select().single();
+
+    if (error) {
+      console.error('Supabase insert error:', error);
+      return;
+    }
+
+    setExpenses((current) => [mapSupabaseExpense(data), ...current]);
     setForm((current) => ({
       ...createDefaultForm(participants),
       paidBy: current.paidBy,
@@ -326,7 +394,14 @@ export default function Home() {
     }));
   };
 
-  const removeExpense = (id) => {
+  const removeExpense = async (id) => {
+    const { error } = await supabase.from('expenses').delete().eq('id', id).eq('user_id', user?.id);
+
+    if (error) {
+      console.error('Supabase delete error:', error);
+      return;
+    }
+
     setExpenses((current) => current.filter((expense) => expense.id !== id));
   };
 
@@ -389,6 +464,36 @@ export default function Home() {
     return rows;
   };
 
+  if (!user) {
+    return (
+      <main className="app-shell auth-shell">
+        <div className="auth-card panel">
+          <div className="eyebrow">SplitSmart</div>
+          <h2>Daily expense ledger</h2>
+          <p>Sign in with your email to view and manage expenses.</p>
+
+          <form onSubmit={handleMagicLink} className="auth-form">
+            <label>
+              <span>Email</span>
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+                required
+              />
+            </label>
+
+            <button type="submit" className="primary-btn">Send magic link</button>
+          </form>
+
+          {authMessage && <div className="auth-success">{authMessage}</div>}
+          {authError && <div className="auth-error">{authError}</div>}
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell">
       <div className="frame">
@@ -397,7 +502,10 @@ export default function Home() {
             <div className="eyebrow">DAILY LEDGER</div>
             <h1>SplitSmart</h1>
           </div>
-          <div className="live-pill">{dayLabel(formatDateKey(new Date()))}</div>
+          <div className="topbar-actions">
+            <div className="live-pill">{dayLabel(formatDateKey(new Date()))}</div>
+            <button type="button" className="secondary-btn small-btn" onClick={handleSignOut}>Sign out</button>
+          </div>
         </header>
 
         <section className="summary-grid">
