@@ -125,6 +125,29 @@ const mapSupabaseExpense = (expense) => ({
   date: expense.date || formatDateKey(new Date()),
 });
 
+const localExpenseStorageKey = (username) => `brokeBrosExpenses:${encodeURIComponent(username)}`;
+
+const readLocalExpenses = (username) => {
+  try {
+    const storedExpenses = localStorage.getItem(localExpenseStorageKey(username));
+    const parsedExpenses = storedExpenses ? JSON.parse(storedExpenses) : [];
+    return Array.isArray(parsedExpenses) ? parsedExpenses : [];
+  } catch (error) {
+    console.error('Unable to read saved expenses:', error);
+    return [];
+  }
+};
+
+const writeLocalExpenses = (username, expenses) => {
+  try {
+    localStorage.setItem(localExpenseStorageKey(username), JSON.stringify(expenses));
+    return true;
+  } catch (error) {
+    console.error('Unable to save expenses on this device:', error);
+    return false;
+  }
+};
+
 export default function Home() {
   const [participants, setParticipants] = useState(DEFAULT_PARTICIPANTS);
   const [expenses, setExpenses] = useState([]);
@@ -134,6 +157,9 @@ export default function Home() {
   const [password, setPassword] = useState('');
   const [authMessage, setAuthMessage] = useState('');
   const [authError, setAuthError] = useState('');
+  const [expenseFeedback, setExpenseFeedback] = useState('');
+  const [expenseFeedbackError, setExpenseFeedbackError] = useState(false);
+  const [isSavingExpense, setIsSavingExpense] = useState(false);
   const [user, setUser] = useState(null);
   const [isReady, setIsReady] = useState(false);
 
@@ -166,6 +192,7 @@ export default function Home() {
       return;
     }
 
+    let isCurrent = true;
     const fetchExpenses = async () => {
       const { data, error } = await supabase
         .from('expenses')
@@ -175,15 +202,33 @@ export default function Home() {
 
       if (error) {
         console.error('Supabase fetch error:', error);
-        setExpenses([]);
+        const localExpenses = readLocalExpenses(user.username);
+        if (isCurrent) {
+          setExpenses(localExpenses);
+          setExpenseFeedback(localExpenses.length
+            ? 'Showing expenses saved on this device. Supabase could not be reached.'
+            : 'Supabase could not be reached. New expenses will be saved on this device.');
+          setExpenseFeedbackError(true);
+        }
         return;
       }
 
       const rows = (data || []).map(mapSupabaseExpense);
-      setExpenses(rows);
+      const localExpenses = readLocalExpenses(user.username);
+      const remoteIds = new Set(rows.map((expense) => expense.id));
+      const mergedExpenses = [...localExpenses.filter((expense) => !remoteIds.has(expense.id)), ...rows];
+      if (isCurrent) {
+        setExpenses(mergedExpenses);
+        setExpenseFeedback(localExpenses.length ? 'Some expenses are saved only on this device.' : '');
+        setExpenseFeedbackError(false);
+      }
     };
 
     fetchExpenses();
+
+    return () => {
+      isCurrent = false;
+    };
   }, [user]);
 
   useEffect(() => {
@@ -354,14 +399,21 @@ export default function Home() {
     localStorage.removeItem('splitSmartCredentials');
     setUser(null);
     setExpenses([]);
+    setExpenseFeedback('');
   };
 
   const addExpense = async (event) => {
     event.preventDefault();
+    setExpenseFeedback('');
+    setExpenseFeedbackError(false);
     if (!user) return;
 
     const amount = Number(form.amount || 0);
-    if (!form.title.trim() || !amount || !form.paidBy) return;
+    if (!form.title.trim() || amount <= 0 || !form.paidBy) {
+      setExpenseFeedback('Enter a title and an amount greater than zero.');
+      setExpenseFeedbackError(true);
+      return;
+    }
 
     const selectedParticipants = form.splitBetween.length ? form.splitBetween : [form.paidBy];
     const normalizedCustom = normalizeShares(amount, selectedParticipants, form.customShares || {});
@@ -379,32 +431,69 @@ export default function Home() {
       created_at: new Date().toISOString(),
     };
 
-    const { data, error } = await supabase.from('expenses').insert(payload).select().single();
+    setIsSavingExpense(true);
+    let savedExpense = null;
+    let fallbackReason = '';
 
-    if (error) {
+    try {
+      const { data, error } = await supabase.from('expenses').insert(payload).select().single();
+      if (error) {
+        console.error('Supabase insert error:', error);
+        fallbackReason = error.message;
+      } else {
+        savedExpense = mapSupabaseExpense(data);
+      }
+    } catch (error) {
       console.error('Supabase insert error:', error);
-      return;
+      fallbackReason = error instanceof Error ? error.message : 'Database request failed.';
     }
 
-    setExpenses((current) => [mapSupabaseExpense(data), ...current]);
-    setForm((current) => ({
-      ...createDefaultForm(participants),
-      paidBy: current.paidBy,
-      splitBetween: [...participants],
-      customShares: Object.fromEntries((participants || []).map((person) => [person, 0])),
-      date: current.date,
-    }));
+    if (!savedExpense) {
+      const localExpense = mapSupabaseExpense({ ...payload, id: `local-${Date.now()}-${Math.random().toString(36).slice(2)}` });
+      const localExpenses = readLocalExpenses(user.username);
+      if (writeLocalExpenses(user.username, [localExpense, ...localExpenses])) {
+        savedExpense = localExpense;
+        setExpenseFeedback(`Saved on this device. Database error: ${fallbackReason}`);
+        setExpenseFeedbackError(true);
+      } else {
+        setExpenseFeedback('Could not save the expense. Check browser storage and Supabase settings.');
+        setExpenseFeedbackError(true);
+      }
+    }
+
+    if (savedExpense) {
+      setExpenses((current) => [savedExpense, ...current.filter((expense) => expense.id !== savedExpense.id)]);
+      setForm((current) => ({
+        ...createDefaultForm(participants),
+        paidBy: current.paidBy,
+        splitBetween: [...participants],
+        customShares: Object.fromEntries((participants || []).map((person) => [person, 0])),
+        date: current.date,
+      }));
+    }
+    setIsSavingExpense(false);
   };
 
   const removeExpense = async (id) => {
+    if (String(id).startsWith('local-')) {
+      const nextLocalExpenses = readLocalExpenses(user.username).filter((expense) => expense.id !== id);
+      writeLocalExpenses(user.username, nextLocalExpenses);
+      setExpenses((current) => current.filter((expense) => expense.id !== id));
+      return;
+    }
+
     const { error } = await supabase.from('expenses').delete().eq('id', id).eq('user_id', user?.id);
 
     if (error) {
       console.error('Supabase delete error:', error);
+      setExpenseFeedback(`Could not remove expense from the database: ${error.message}`);
+      setExpenseFeedbackError(true);
       return;
     }
 
     setExpenses((current) => current.filter((expense) => expense.id !== id));
+    setExpenseFeedback('Expense removed.');
+    setExpenseFeedbackError(false);
   };
 
   const expenseSettlementsForDay = (items) => {
@@ -538,6 +627,12 @@ export default function Home() {
           </div>
         </section>
 
+        {expenseFeedback && (
+          <div className={`expense-feedback${expenseFeedbackError ? ' is-error' : ''}`} role="status">
+            {expenseFeedback}
+          </div>
+        )}
+
         <section className="summary-grid">
           <div className="stat-card highlight">
             <span className="label">TOTAL SPENT</span>
@@ -551,7 +646,9 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="panel participants-panel">
+        <div className="workspace-grid">
+          <div className="workspace-sidebar">
+            <section className="panel participants-panel">
           <div className="section-head">
             <span>GROUP</span>
             <span className="meta">{participants.length} members</span>
@@ -573,9 +670,9 @@ export default function Home() {
             />
             <button type="button" className="secondary-btn" onClick={addParticipant}>Add</button>
           </div>
-        </section>
+          </section>
 
-        <form id="expense-form" className="panel form-panel" onSubmit={addExpense}>
+          <form id="expense-form" className="panel form-panel" onSubmit={addExpense}>
           <div className="section-head">
             <span>ADD EXPENSE</span>
             <span className="meta">daily entry</span>
@@ -586,6 +683,7 @@ export default function Home() {
               <span>Title</span>
               <input
                 type="text"
+                required
                 value={form.title}
                 onChange={(event) => setForm((current) => ({ ...current, title: event.target.value }))}
                 placeholder="Dinner, groceries..."
@@ -605,8 +703,9 @@ export default function Home() {
               <span>Amount</span>
               <input
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
+                required
                 value={form.amount}
                 onChange={(event) => setForm((current) => ({ ...current, amount: event.target.value }))}
                 placeholder="0"
@@ -692,10 +791,12 @@ export default function Home() {
             )}
           </div>
 
-          <button type="submit" className="primary-btn">Add Expense</button>
-        </form>
+              <button type="submit" className="primary-btn" disabled={isSavingExpense}>
+                {isSavingExpense ? 'Saving...' : 'Add Expense'}
+              </button>
+            </form>
 
-        <section className="panel settlement-panel">
+            <section className="panel settlement-panel">
           <div className="section-head">
             <span>SETTLEMENTS</span>
             <span className="meta">net balance</span>
@@ -715,9 +816,10 @@ export default function Home() {
               ))
             )}
           </div>
-        </section>
+            </section>
+          </div>
 
-        <section id="daily-ledger" className="ledger">
+          <section id="daily-ledger" className="ledger">
           {dailyGroups.length === 0 ? (
             <div className="panel empty-ledger">No expenses yet. Add the first one above.</div>
           ) : (
@@ -773,7 +875,8 @@ export default function Home() {
               </article>
             ))
           )}
-        </section>
+          </section>
+        </div>
       </div>
     </main>
   );

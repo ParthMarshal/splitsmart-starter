@@ -347,6 +347,38 @@ select {
   background: linear-gradient(135deg, rgba(215, 25, 32, 0.15), rgba(17, 17, 17, 1));
 }
 
+.expense-feedback {
+  padding: 12px 16px;
+  border: 1px solid rgba(104, 214, 127, 0.45);
+  background: rgba(104, 214, 127, 0.08);
+  color: #dfffe6;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.expense-feedback.is-error {
+  border-color: rgba(240, 174, 76, 0.55);
+  background: rgba(240, 174, 76, 0.08);
+  color: #ffe2b4;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.85fr);
+  grid-template-areas: 'main aside';
+  align-items: start;
+  gap: 20px;
+}
+
+.workspace-sidebar {
+  grid-area: aside;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
 .positive {
   color: #e7fce8;
 }
@@ -570,6 +602,8 @@ select {
 }
 
 .ledger {
+  grid-area: main;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -584,7 +618,7 @@ select {
 .day-head {
   display: flex;
   justify-content: space-between;
-  align-items: end;
+  align-items: flex-end;
   gap: 12px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
@@ -680,7 +714,20 @@ select {
   color: var(--muted);
 }
 
+@media (max-width: 900px) {
+  .workspace-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'aside'
+      'main';
+  }
+}
+
 @media (max-width: 760px) {
+  .app-shell {
+    padding: 20px 12px 32px;
+  }
+
   .frame {
     gap: 16px;
   }
@@ -757,9 +804,38 @@ select {
     width: 100%;
     min-height: 42px;
   }
+
+  .primary-btn,
+  .ghost-btn {
+    min-height: 42px;
+  }
+
+  .panel {
+    padding: 15px 14px;
+  }
 }
 
 @media (max-width: 440px) {
+  .topbar {
+    gap: 6px;
+    padding: 12px;
+  }
+
+  .topbar h1 {
+    font-size: 1.75rem;
+  }
+
+  .topbar-actions {
+    gap: 4px;
+  }
+
+  .circle-btn {
+    width: 34px;
+    height: 34px;
+    flex-basis: 34px;
+    font-size: 1rem;
+  }
+
   .dashboard-intro {
     align-items: flex-start;
   }
