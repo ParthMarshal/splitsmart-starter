@@ -130,31 +130,34 @@ export default function Home() {
   const [expenses, setExpenses] = useState([]);
   const [form, setForm] = useState(createDefaultForm(DEFAULT_PARTICIPANTS));
   const [newParticipant, setNewParticipant] = useState('');
-  const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [authMessage, setAuthMessage] = useState('');
   const [authError, setAuthError] = useState('');
-  const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
-    const getSession = async () => {
-      const { data: { session: currentSession }, error } = await supabase.auth.getSession();
-      if (!error) {
-        setSession(currentSession);
-        setUser(currentSession?.user ?? null);
-      }
+    const storedCredentials = localStorage.getItem('splitSmartCredentials');
+    if (!storedCredentials) {
       setIsReady(true);
-    };
+      return;
+    }
 
-    getSession();
+    try {
+      const parsed = JSON.parse(storedCredentials);
+      if (parsed?.username && parsed?.password) {
+        setUser({
+          id: parsed.username,
+          username: parsed.username,
+        });
+      }
+    } catch (error) {
+      console.error('Unable to parse stored credentials:', error);
+      localStorage.removeItem('splitSmartCredentials');
+    }
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-      setUser(nextSession?.user ?? null);
-    });
-
-    return () => authListener.subscription.unsubscribe();
+    setIsReady(true);
   }, []);
 
   useEffect(() => {
@@ -319,37 +322,36 @@ export default function Home() {
     });
   };
 
-  const handleMagicLink = async (event) => {
+  const handleLogin = (event) => {
     event.preventDefault();
     setAuthMessage('');
     setAuthError('');
 
-    const trimmedEmail = email.trim();
-    if (!trimmedEmail) {
-      setAuthError('Please enter your email address.');
+    const trimmedUsername = username.trim();
+    const trimmedPassword = password.trim();
+
+    if (!trimmedUsername || !trimmedPassword) {
+      setAuthError('Please enter both username and password.');
       return;
     }
 
-    const redirectUrl = `${window.location.origin}`;
-    const { error } = await supabase.auth.signInWithOtp({
-      email: trimmedEmail,
-      options: {
-        emailRedirectTo: redirectUrl,
-      },
+    const credentials = {
+      username: trimmedUsername,
+      password: trimmedPassword,
+    };
+
+    localStorage.setItem('splitSmartCredentials', JSON.stringify(credentials));
+    setUser({
+      id: trimmedUsername,
+      username: trimmedUsername,
     });
-
-    if (error) {
-      setAuthError(error.message || 'Unable to sign in.');
-      return;
-    }
-
-    setAuthMessage('Magic link sent. Check your email and click the sign-in link.');
-    setEmail('');
+    setAuthMessage('Signed in successfully.');
+    setUsername('');
+    setPassword('');
   };
 
-  const handleSignOut = async () => {
-    await supabase.auth.signOut();
-    setSession(null);
+  const handleSignOut = () => {
+    localStorage.removeItem('splitSmartCredentials');
     setUser(null);
     setExpenses([]);
   };
@@ -470,21 +472,32 @@ export default function Home() {
         <div className="auth-card panel">
           <div className="eyebrow">SplitSmart</div>
           <h2>Daily expense ledger</h2>
-          <p>Sign in with your email to view and manage expenses.</p>
+          <p>Sign in with your username and password to view and manage expenses.</p>
 
-          <form onSubmit={handleMagicLink} className="auth-form">
+          <form onSubmit={handleLogin} className="auth-form">
             <label>
-              <span>Email</span>
+              <span>Username</span>
               <input
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="you@example.com"
+                type="text"
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                placeholder="username"
                 required
               />
             </label>
 
-            <button type="submit" className="primary-btn">Send magic link</button>
+            <label>
+              <span>Password</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="password"
+                required
+              />
+            </label>
+
+            <button type="submit" className="primary-btn">Sign in</button>
           </form>
 
           {authMessage && <div className="auth-success">{authMessage}</div>}
@@ -499,14 +512,30 @@ export default function Home() {
       <div className="frame">
         <header className="topbar">
           <div>
-            <div className="eyebrow">DAILY LEDGER</div>
-            <h1>SplitSmart</h1>
+            <div className="eyebrow">GROUP FINANCE / DAILY LEDGER</div>
+            <h1 className="brand-dotmark">Broke_Bros</h1>
           </div>
           <div className="topbar-actions">
             <div className="live-pill">{dayLabel(formatDateKey(new Date()))}</div>
-            <button type="button" className="secondary-btn small-btn" onClick={handleSignOut}>Sign out</button>
+            <button type="button" className="circle-btn" aria-label="Add an expense" title="Add an expense" onClick={() => document.getElementById('expense-form')?.scrollIntoView({ behavior: 'smooth' })}>+</button>
+            <button type="button" className="circle-btn" aria-label="View daily ledger" title="View daily ledger" onClick={() => document.getElementById('daily-ledger')?.scrollIntoView({ behavior: 'smooth' })}>▤</button>
+            <button type="button" className="circle-btn signout-btn" aria-label="Sign out" title="Sign out" onClick={handleSignOut}>⏻</button>
           </div>
         </header>
+
+        <section className="dashboard-intro" aria-label="Dashboard overview">
+          <div className="dashboard-copy">
+            <span className="signal-label"><span className="signal-dot" /> LIVE GROUP DASHBOARD</span>
+            <h2>Money, <span>in sync.</span></h2>
+            <p>Your shared spending, daily totals, and settlements in one place.</p>
+          </div>
+          <div className="orbit-mark" aria-hidden="true">
+            <span className="orbit orbit-one" />
+            <span className="orbit orbit-two" />
+            <span className="orbit-core" />
+            <span className="orbit-caption">BROKE<br />BROS / 01</span>
+          </div>
+        </section>
 
         <section className="summary-grid">
           <div className="stat-card highlight">
@@ -545,7 +574,7 @@ export default function Home() {
           </div>
         </section>
 
-        <form className="panel form-panel" onSubmit={addExpense}>
+        <form id="expense-form" className="panel form-panel" onSubmit={addExpense}>
           <div className="section-head">
             <span>ADD EXPENSE</span>
             <span className="meta">daily entry</span>
@@ -687,7 +716,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="ledger">
+        <section id="daily-ledger" className="ledger">
           {dailyGroups.length === 0 ? (
             <div className="panel empty-ledger">No expenses yet. Add the first one above.</div>
           ) : (

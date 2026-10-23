@@ -1,8 +1,8 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'SplitSmart',
-  description: 'Split expenses with your group — the easy way.',
+  title: 'Broke_Bros',
+  description: 'A shared daily expense dashboard for your group.',
 };
 
 export const viewport = {
