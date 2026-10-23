@@ -525,6 +525,7 @@ export default function Home() {
 
         <section className="dashboard-intro" aria-label="Dashboard overview">
           <div className="dashboard-copy">
+            <div className="greeting">Hi, Welcome {user.username}</div>
             <span className="signal-label"><span className="signal-dot" /> LIVE GROUP DASHBOARD</span>
             <h2>Money, <span>in sync.</span></h2>
             <p>Your shared spending, daily totals, and settlements in one place.</p>
